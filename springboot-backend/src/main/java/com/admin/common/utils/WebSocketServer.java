@@ -5,12 +5,15 @@ import com.admin.common.dto.GostConfigDto;
 import com.admin.common.dto.GostDto;
 import com.admin.common.task.CheckGostConfigAsync;
 import com.admin.entity.Node;
+import com.admin.service.ForwardService;
 import com.admin.service.NodeService;
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.context.annotation.Lazy;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
@@ -30,6 +33,10 @@ public class WebSocketServer extends TextWebSocketHandler {
 
     @Resource
     NodeService nodeService;
+
+    @Resource
+    @Lazy
+    private ForwardService forwardService;
 
     // 存储所有活跃的 WebSocket 连接（
     private static final CopyOnWriteArraySet<WebSocketSession> activeSessions = new CopyOnWriteArraySet<>();
@@ -280,6 +287,15 @@ public class WebSocketServer extends TextWebSocketHandler {
                         res.put("type", "status");
                         res.put("data", 1);
                         broadcastMessage(res.toJSONString());
+
+                        // 节点重连后自动同步转发规则
+                        try {
+                            log.info("节点 {} 重连，开始自动同步转发规则...", nodeId);
+                            forwardService.syncNodeForwards(nodeId);
+                        } catch (Exception syncError) {
+                            log.info("节点 {} 自动同步转发规则异常: {}", nodeId, syncError.getMessage());
+                            // 同步失败不影响节点连接状态
+                        }
                     } else {
                         log.info("节点 {} 状态更新失败", nodeId);
                     }

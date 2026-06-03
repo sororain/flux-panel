@@ -42,7 +42,8 @@ import {
   pauseForwardService,
   resumeForwardService,
   diagnoseForward,
-  updateForwardOrder
+  updateForwardOrder,
+  syncAllForwards
 } from "@/api";
 import { JwtUtil } from "@/utils/jwt";
 
@@ -170,6 +171,7 @@ export default function ForwardPage() {
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [exportData, setExportData] = useState('');
   const [exportLoading, setExportLoading] = useState(false);
+  const [syncLoading, setSyncLoading] = useState(false);
   const [selectedTunnelForExport, setSelectedTunnelForExport] = useState<number | null>(null);
   
   // 导入相关状态
@@ -874,6 +876,25 @@ export default function ForwardPage() {
     setImportModalOpen(true);
   };
 
+  // 一键同步所有转发规则到节点
+  const handleSyncAll = async () => {
+    setSyncLoading(true);
+    try {
+      const res = await syncAllForwards();
+      if (res.code === 0) {
+        toast.success(res.data || '全量同步成功');
+        // 同步后刷新列表
+        loadData();
+      } else {
+        toast.error(res.msg || '同步失败');
+      }
+    } catch (error) {
+      toast.error('同步请求失败');
+    } finally {
+      setSyncLoading(false);
+    }
+  };
+
   // 执行导入
   const executeImport = async () => {
     if (!importData.trim()) {
@@ -1400,6 +1421,17 @@ export default function ForwardPage() {
           
             >
               导出
+            </Button>
+
+            {/* 同步按钮 */}
+            <Button
+              size="sm"
+              variant="flat"
+              color="secondary"
+              onPress={handleSyncAll}
+              isLoading={syncLoading}
+            >
+              同步
             </Button>
 
             <Button

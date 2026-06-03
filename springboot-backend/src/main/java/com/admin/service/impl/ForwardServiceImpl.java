@@ -1401,6 +1401,224 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
         updateGostServices(forward, tunnel, limiter, nodeInfo, userTunnel);
     }
 
+    // ========== 转发规则同步方法 ==========
+
+    @Override
+    public R syncAllForwards() {
+        log.info("===== 开始全量同步所有转发规则 =====");
+        List<Node> allNodes = nodeService.list();
+        List<String> successNodes = new ArrayList<>();
+        List<String> failNodes = new ArrayList<>();
+
+        for (Node node : allNodes) {
+            // 只同步在线的节点
+            if (node.getStatus() != null && node.getStatus() == 1) {
+                R result = syncNodeForwards(node.getId().longValue());
+                if (result.getCode() == 0) {
+                    successNodes.add(node.getName());
+                } else {
+                    failNodes.add(node.getName() + "(" + result.getMsg() + ")");
+                }
+            }
+        }
+
+        StringBuilder summary = new StringBuilder("全量同步完成");
+        if (!successNodes.isEmpty()) {
+            summary.append("，成功节点: ").append(String.join(", ", successNodes));
+        }
+        if (!failNodes.isEmpty()) {
+            summary.append("，失败节点: ").append(String.join(", ", failNodes));
+        }
+        log.info(summary.toString());
+        return R.ok(summary.toString());
+    }
+
+    @Override
+    public R syncNodeForwards(Long nodeId) {
+        Node node = nodeService.getNodeById(nodeId);
+        if (node == null) {
+            return R.err("节点不存在");
+        }
+        if (node.getStatus() != 1) {
+            return R.err("节点不在线，无法同步");
+        }
+
+        log.info("===== 开始同步节点 {} 的转发规则 =====", node.getName());
+
+        // 1. 找到涉及该节点的所有隧道（作为入口或出口）
+        List<Tunnel> relatedTunnels = tunnelService.list(
+                new QueryWrapper<Tunnel>()
+                        .and(w -> w.eq("in_node_id", nodeId)
+                                .or().eq("out_node_id", nodeId))
+        );
+
+        if (relatedTunnels.isEmpty()) {
+            return R.ok("节点 " + node.getName() + " 没有关联的隧道，无需同步");
+        }
+
+        // 2. 收集这些隧道下所有活跃的转发
+        List<Long> tunnelIds = relatedTunnels.stream()
+                .map(Tunnel::getId)
+                .collect(Collectors.toList());
+
+        List<Forward> forwards = this.list(
+                new QueryWrapper<Forward>()
+                        .in("tunnel_id", tunnelIds)
+                        .eq("status", FORWARD_STATUS_ACTIVE)
+        );
+
+        if (forwards.isEmpty()) {
+            return R.ok("节点 " + node.getName() + " 没有活跃的转发规则需要同步");
+        }
+
+        // 3. 逐条同步转发规则到节点
+        int success = 0;
+        int fail = 0;
+        List<String> errorDetails = new ArrayList<>();
+
+        for (Forward forward : forwards) {
+            try {
+                Tunnel tunnel = relatedTunnels.stream()
+                        .filter(t -> t.getId().equals(forward.getTunnelId()))
+                        .findFirst()
+                        .orElse(null);
+                if (tunnel == null) {
+                    fail++;
+                    errorDetails.add("转发#" + forward.getId() + ": 隧道不存在");
+                    continue;
+                }
+
+                // 判断此转发是否需要同步到当前节点
+                boolean needSyncToThisNode = false;
+                if (tunnel.getInNodeId().equals(nodeId)) {
+                    needSyncToThisNode = true;
+                }
+                // 隧道转发类型，出口节点也需要同步远程服务
+                if (tunnel.getType() == TUNNEL_TYPE_TUNNEL_FORWARD
+                        && tunnel.getOutNodeId() != null
+                        && tunnel.getOutNodeId().equals(nodeId)) {
+                    needSyncToThisNode = true;
+                }
+
+                if (!needSyncToThisNode) {
+                    continue;
+                }
+
+                // 获取用户隧道关系（用于构建服务名称和限速器）
+                UserTunnel userTunnel = getUserTunnel(forward.getUserId(), tunnel.getId().intValue());
+                String serviceName = buildServiceName(forward.getId(), forward.getUserId(), userTunnel);
+
+                // 获取限速器
+                Integer limiter = null;
+                if (userTunnel != null && userTunnel.getSpeedId() != null) {
+                    limiter = userTunnel.getSpeedId();
+                }
+
+                // 获取节点信息
+                Node inNode = null;
+                Node outNode = null;
+
+                if (tunnel.getInNodeId().equals(nodeId)) {
+                    inNode = node;
+                } else {
+                    inNode = nodeService.getNodeById(tunnel.getInNodeId());
+                }
+                if (tunnel.getOutNodeId() != null && tunnel.getOutNodeId().equals(nodeId)) {
+                    outNode = node;
+                } else if (tunnel.getOutNodeId() != null) {
+                    outNode = nodeService.getNodeById(tunnel.getOutNodeId());
+                }
+
+                // 先尝试更新，如果服务不存在则创建
+                if (tunnel.getType() == TUNNEL_TYPE_TUNNEL_FORWARD) {
+                    // 隧道转发
+                    if (inNode != null && tunnel.getInNodeId().equals(nodeId)) {
+                        // 同步链服务到入口节点
+                        String remoteAddr = tunnel.getOutIp() + ":" + forward.getOutPort();
+                        if (tunnel.getOutIp() != null && tunnel.getOutIp().contains(":")) {
+                            remoteAddr = "[" + tunnel.getOutIp() + "]:" + forward.getOutPort();
+                        }
+                        GostDto chainResult = GostUtil.UpdateChains(nodeId, serviceName,
+                                remoteAddr, tunnel.getProtocol(), tunnel.getInterfaceName());
+                        if (chainResult.getMsg().contains(GOST_NOT_FOUND_MSG)) {
+                            chainResult = GostUtil.AddChains(nodeId, serviceName,
+                                    remoteAddr, tunnel.getProtocol(), tunnel.getInterfaceName());
+                        }
+                        if (!isGostOperationSuccess(chainResult)) {
+                            log.warn("同步转发#{}链服务到节点{}失败: {}", forward.getId(), node.getName(), chainResult.getMsg());
+                        }
+
+                        // 同步主服务
+                        String iface = null;
+                        GostDto svcResult = GostUtil.UpdateService(nodeId, serviceName,
+                                forward.getInPort(), limiter, forward.getRemoteAddr(),
+                                tunnel.getType(), tunnel, forward.getStrategy(), iface);
+                        if (svcResult.getMsg().contains(GOST_NOT_FOUND_MSG)) {
+                            svcResult = GostUtil.AddService(nodeId, serviceName,
+                                    forward.getInPort(), limiter, forward.getRemoteAddr(),
+                                    tunnel.getType(), tunnel, forward.getStrategy(), iface);
+                        }
+                        if (!isGostOperationSuccess(svcResult)) {
+                            log.warn("同步转发#{}主服务到节点{}失败: {}", forward.getId(), node.getName(), svcResult.getMsg());
+                        }
+                    }
+
+                    // 同步远程服务到出口节点
+                    if (outNode != null && tunnel.getOutNodeId().equals(nodeId)) {
+                        GostDto remoteResult = GostUtil.UpdateRemoteService(nodeId, serviceName,
+                                forward.getOutPort(), forward.getRemoteAddr(),
+                                tunnel.getProtocol(), forward.getStrategy(), forward.getInterfaceName());
+                        if (remoteResult.getMsg().contains(GOST_NOT_FOUND_MSG)) {
+                            remoteResult = GostUtil.AddRemoteService(nodeId, serviceName,
+                                    forward.getOutPort(), forward.getRemoteAddr(),
+                                    tunnel.getProtocol(), forward.getStrategy(), forward.getInterfaceName());
+                        }
+                        if (!isGostOperationSuccess(remoteResult)) {
+                            log.warn("同步转发#{}远程服务到节点{}失败: {}", forward.getId(), node.getName(), remoteResult.getMsg());
+                        }
+                    }
+                } else {
+                    // 端口转发 - 只同步到入口节点
+                    if (inNode != null && tunnel.getInNodeId().equals(nodeId)) {
+                        String iface = forward.getInterfaceName();
+                        GostDto svcResult = GostUtil.UpdateService(nodeId, serviceName,
+                                forward.getInPort(), limiter, forward.getRemoteAddr(),
+                                tunnel.getType(), tunnel, forward.getStrategy(), iface);
+                        if (svcResult.getMsg().contains(GOST_NOT_FOUND_MSG)) {
+                            svcResult = GostUtil.AddService(nodeId, serviceName,
+                                    forward.getInPort(), limiter, forward.getRemoteAddr(),
+                                    tunnel.getType(), tunnel, forward.getStrategy(), iface);
+                        }
+                        if (!isGostOperationSuccess(svcResult)) {
+                            fail++;
+                            errorDetails.add("转发#" + forward.getId() + ": " + svcResult.getMsg());
+                            continue;
+                        }
+                    }
+                }
+
+                success++;
+                log.info("转发#{} ({}): 同步到节点{}成功", forward.getId(), forward.getName(), node.getName());
+
+            } catch (Exception e) {
+                fail++;
+                errorDetails.add("转发#" + forward.getId() + ": " + e.getMessage());
+                log.error("同步转发#{}到节点{}异常", forward.getId(), node.getName(), e);
+            }
+        }
+
+        String summary = "节点 " + node.getName() + " 同步完成: 成功 " + success + " 条";
+        if (fail > 0) {
+            summary += ", 失败 " + fail + " 条: " + String.join("; ", errorDetails);
+        }
+        log.info(summary);
+
+        if (fail > 0) {
+            return R.ok(summary); // 即使有部分失败也返回成功，避免阻塞整体流程
+        }
+        return R.ok(summary);
+    }
+
 
     // ========== 内部数据类 ==========
 

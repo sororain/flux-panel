@@ -97,4 +97,30 @@ public class ForwardController extends BaseController {
         return forwardService.updateForwardOrder(params);
     }
 
+    /**
+     * 全量同步所有转发规则到对应的在线节点
+     * 用于：节点重连后手动触发、迁移服务器后恢复规则
+     * @return 同步结果
+     */
+    @LogAnnotation
+    @RequireRole
+    @PostMapping("/sync-all")
+    public R syncAllForwards() {
+        return forwardService.syncAllForwards();
+    }
+
+    /**
+     * 同步指定节点的所有转发规则
+     * 用于：单个节点重连后手动触发同步
+     * @param params 包含nodeId的参数
+     * @return 同步结果
+     */
+    @LogAnnotation
+    @RequireRole
+    @PostMapping("/sync-node")
+    public R syncNodeForwards(@RequestBody Map<String, Object> params) {
+        Long nodeId = Long.valueOf(params.get("nodeId").toString());
+        return forwardService.syncNodeForwards(nodeId);
+    }
+
 }

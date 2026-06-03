@@ -80,6 +80,20 @@ public interface ForwardService extends IService<Forward> {
      */
     R updateForwardOrder(Map<String, Object> params);
 
+    /**
+     * 同步所有转发规则到对应的节点
+     * 用于场景：节点重连后、手动触发全量同步
+     * @return 同步结果
+     */
+    R syncAllForwards();
+
+    /**
+     * 同步指定节点的所有转发规则
+     * 当节点 WebSocket 重连时自动调用
+     * @param nodeId 节点ID
+     * @return 同步结果
+     */
+    R syncNodeForwards(Long nodeId);
 
     void updateForwardA(Forward forward);
 }

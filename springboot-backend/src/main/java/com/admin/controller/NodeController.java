@@ -6,6 +6,8 @@ import com.admin.common.aop.LogAnnotation;
 import com.admin.common.dto.NodeDto;
 import com.admin.common.dto.NodeUpdateDto;
 import com.admin.common.lang.R;
+import com.admin.service.ForwardService;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
@@ -23,6 +25,9 @@ import java.util.Map;
 @CrossOrigin
 @RequestMapping("/api/v1/node")
 public class NodeController extends BaseController {
+
+    @Autowired
+    private ForwardService forwardService;
 
     @LogAnnotation
     @RequireRole
@@ -60,6 +65,20 @@ public class NodeController extends BaseController {
     public R getInstallCommand(@RequestBody Map<String, Object> params) {
         Long id = Long.valueOf(params.get("id").toString());
         return nodeService.getInstallCommand(id);
+    }
+
+    /**
+     * 同步指定节点的所有转发规则
+     * 用于：节点重连后手动触发规则同步
+     * @param params 包含nodeId的参数
+     * @return 同步结果
+     */
+    @LogAnnotation
+    @RequireRole
+    @PostMapping("/sync")
+    public R syncNodeForwards(@RequestBody Map<String, Object> params) {
+        Long nodeId = Long.valueOf(params.get("nodeId").toString());
+        return forwardService.syncNodeForwards(nodeId);
     }
 
 }
